@@ -1,0 +1,97 @@
+require(tidyverse)
+require(httr)
+require(RCurl)
+require(rvkstat)
+require(vkR)
+require(jsonlite)
+
+###remaking fun for binding rows
+researchGetGroup <- function(groupid){
+  groupList <- getGroupsMembers(group_id = paste0(groupid), fields = 'bdate,education') #getting the initial list + count
+  groupDF <- as.data.frame(groupList[2]) #creating DF
+  iternum <- ceiling(groupList$count/1000) #counting the number of iterations
+  print(paste0('Now getting ', groupList$count, ' users from group ', groupid, '. That will take appronroximately ', iternum, ' iterations and ', iternum/3, ' seconds. Stay tuned.'))
+  for(i in 1:iternum){
+    print(paste0('Now processing iteration: ', i))
+    nextgroupDF <- as.data.frame(getGroupsMembers(group_id = paste0(groupid), fields = 'bdate,education', offset = i*1000)[2])
+    groupDF <- bind_rows(groupDF, nextgroupDF)
+  }
+  groupDF$group.id <- groupid
+  return(groupDF)
+}
+
+###making fun for getting group posts
+researchGetGroupsPostsStat <- function (group_id = NULL, extended = 0, offset = 0, count = 100, access_token = NULL)
+{
+  for(i in 1:length(group_id))
+  {
+    for(y in 1:(count/100)) {
+    apiQuerry <- paste0("https://api.vk.com/method/wall.get?owner_id=-", group_id[i],
+                       '&offset=', offset,
+                       '&count=100',
+                       '&extended=', extended,
+                       "&v=5.52&access_token=", access_token)
+    vkdatajson <- getURL(apiQuerry)
+    vkdatalist <- fromJSON(vkdatajson)
+    
+    print(paste0('Now processing group ', group_id[i], ', count iteration ', y,'/', count/100))
+    
+    if(y == 1) {
+      vkDataRaw <- vkdatalist$response %>% as.data.frame() %>% select(items.from_id, items.id, items.date, items.likes, items.comments) %>% mutate(items.likes = items.likes$count,
+                                                                                                                                                   items.comments = items.comments$count)
+      } else {
+        vkDataRawTemp <- vkdatalist$response %>% as.data.frame() %>% select(items.from_id, items.id, items.date, items.likes, items.comments) %>% mutate(items.likes = items.likes$count,
+                                                                                                                                                         items.comments = items.comments$count)
+           vkDataRaw <- bind_rows(vkDataRaw, vkDataRawTemp)
+           }
+    
+    if(y < count/100) {offset <- offset + 100}
+         else {
+           offset <- 0
+           rm(vkDataRawTemp)
+         }
+    }
+    
+    vkDataTemp <- vkDataRaw %>% summarise(groupid = abs(min(unique(.$items.from_id))),
+                                      postRatePerDay = round(100/days(Sys.Date() - date(as.POSIXct(min(vkDataRaw$items.date), tz = 'UTC', origin = '1970-01-01')))$day,2),
+                                      medLikesPerPost = median(vkDataRaw$items.likes),
+                                      medCommentsPerPost = median(vkDataRaw$items.comments))
+    
+   if(i == 1) vkData <- vkDataTemp
+    else vkData <- bind_rows(vkData, vkDataTemp)
+  }
+  return(vkData)
+}
+
+###making fun for user information
+researchGetUsersInfo <- function (users_ids = NULL, fields = "sex,bdate,city,home_town,occupation,relation,personal,activities,interests,about", access_token = NULL)
+{
+  splitted <- split(users_ids, ceiling(seq_along(users_ids)/200))
+  splittedFields <- strsplit(fields, ',')[[1]]
+  
+  for(i in 1:length(splitted))
+  {
+      apiQuerry <- paste0("https://api.vk.com/method/users.get?user_ids=", paste0(splitted[[i]], collapse = ','),
+                          '&fields=', fields,
+                          "&v=5.52&access_token=", access_token)
+      vkdatajson <- getURL(apiQuerry)
+      vkdatalist <- fromJSON(vkdatajson)
+      
+      print(paste0('Now processing iteration ', i, '/', length(splitted)))
+      
+      vkDataTemp <- vkdatalist$response %>% 
+        as.data.frame() %>% 
+#check this, add id        select(get(splittedFields)) %>% 
+        flatten()
+
+      
+      if(i == 1) {
+        vkData <- vkDataTemp
+      } else {
+        vkData <- bind_rows(vkData, vkDataTemp)
+      }
+  }
+  vkData %>% mutate(sex = ifelse(sex == 1, 'F', 'M')) %>% select(id, sex, city.title, occupation.type, occupation.name, personal.langs, personal.people_main, personal.life_main, personal.smoking,
+                                                             personal.alcohol, personal.religion, personal.political, personal.inspired_by, relation, interests, activities, about) -> vkData
+  return(vkData)
+}
